@@ -1,0 +1,86 @@
+name: Build iOS IPA with SatellaJailed injection
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (if needed)
+        run: |
+          if [ -f Podfile ]; then
+            sudo gem install cocoapods || true
+            pod install --repo-update || true
+          fi
+
+      - name: Build unsigned IPA
+        uses: sparkfabrik/ios-build-action@v2.3.2
+        with:
+          project-path: "SatellaJailed.xcodeproj"
+          scheme: "SatellaJailed"
+          configuration: "Release"
+          export-method: "development"
+          output-path: "build"
+          export-options: |
+            {
+              "method": "development",
+              "compileBitcode": false,
+              "signingStyle": "manual",
+              "stripSwiftSymbols": true,
+              "thinning": "<none>"
+            }
+        env:
+          CODE_SIGNING_ALLOWED: "NO"
+
+      - name: Download or verify SatellaJailed dylib
+        run: |
+          mkdir -p inject
+          if [ ! -f SatellaJailed.dylib ]; then
+            echo "Place your SatellaJailed.dylib in the repo root or replace this step with a curl wget to fetch it."
+            exit 1
+          fi
+          cp SatellaJailed.dylib inject/
+
+      - name: Inject SatellaJailed.dylib into IPA
+        run: |
+          cd build
+          IPA=$(ls *.ipa | head -n 1)
+          echo "Found IPA: $IPA"
+
+          mkdir -p extracted
+          unzip -q "$IPA" -d extracted
+          APP_PATH=$(find extracted/Payload -type d -name "*.app" | head -n 1)
+          echo "App path: $APP_PATH"
+
+          # Install insert_dylib utility
+          brew install insert_dylib || true
+
+          # Copy your dylib into the app bundle
+          cp ../inject/SatellaJailed.dylib "$APP_PATH/"
+
+          # Inject the load command into the main executable
+          EXECUTABLE=$(defaults read "$APP_PATH/Info.plist" CFBundleExecutable)
+          EXEC_PATH="$APP_PATH/$EXECUTABLE"
+
+          echo "Injecting SatellaJailed.dylib into $EXECUTABLE ..."
+          insert_dylib --all-yes @executable_path/SatellaJailed.dylib "$EXEC_PATH" "$EXEC_PATH.new"
+          mv "$EXEC_PATH.new" "$EXEC_PATH"
+          chmod +x "$EXEC_PATH"
+
+          # Repackage the modified IPA
+          cd extracted
+          zip -qr "../SatellaJailed-Injected.ipa" Payload
+          cd ..
+
+          echo "Injection complete — new IPA: build/SatellaJailed-Injected.ipa"
+
+      - name: Upload modified IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: SatellaJailed-Injected
+          path: build/SatellaJailed-Injected.ipa
